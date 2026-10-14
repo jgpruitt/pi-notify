@@ -52,12 +52,16 @@ Notifications are sent even when the terminal is focused. There is no terminal/t
 | `/notify test` | Immediately submit a test notification, even when automatic pings are off |
 | `/notify off` | Disable automatic pings and cancel pending delivery |
 | `/notify on` | Enable automatic pings for future waiting episodes |
-| `/notify sound` | Show the current sound |
+| `/notify sound` | Open a sound picker with live previews |
 | `/notify sound list` | List built-in sound choices |
 | `/notify sound Ping` | Choose and save a sound (case-insensitive) |
 | `/notify sound none` | Choose and save silent notifications |
 
-Use `/notify test` to preview your selection. Changing sound cancels pending notifications so they do not use the previous sound.
+In the picker, the current sound starts highlighted. Use **↑/↓** to move and hear each sound, **Enter** to save, or **Escape** to cancel without changing your preference. **None (silent)** stops playback and can be saved like any other choice. Sound does not play just from opening the picker.
+
+Previews use macOS's built-in `/usr/bin/afplay`, not notification banners. They start after a 150 ms pause in navigation; moving again stops the previous preview so sounds do not pile up. Closing the picker, reloading, or shutting down Pi stops previews. Automatic notification pings are suppressed while the picker is open.
+
+Previews use normal audio playback, so they may be audible even when Focus suppresses actual notifications. Use `/notify test` to check the actual notification banner and sound with your macOS notification settings. Changing sound cancels pending notifications so they do not use the previous sound. `/notify status` shows the saved sound without opening the picker.
 
 Sound is saved in `~/.pi/agent/pi-notify.json` (or `$PI_CODING_AGENT_DIR/pi-notify.json` when overridden), independently of Pi's own settings. It survives reloads and restarts. Other running Pi instances pick it up on their next session start or reload. You can also edit the file directly and reload:
 
@@ -95,9 +99,11 @@ Layout:
 - `src/notification-controller.ts`: delayed, cancellable, deduplicated waiting episodes.
 - `src/macos.ts`: fixed AppleScript executed with literal argument values and no shell.
 - `src/settings.ts`: sound validation and atomic preference-file writes.
-- `tests/notify.test.ts`: event, command, session identity, sound persistence, privacy, cancellation, and failure coverage.
+- `src/sound-picker.ts`: interactive sound selection with save/cancel behavior.
+- `src/sound-preview.ts`: debounced, cancellable audio previews.
+- `tests/`: event, command, session identity, persistence, picker, preview, privacy, cancellation, and failure coverage.
 
-The Pi package exposes only `extensions/index.ts`. Pi is a host-provided peer dependency; the development copy is used for types and is not bundled.
+The Pi package exposes only `extensions/index.ts`. Pi and Pi TUI are host-provided peer dependencies; development copies support type-checking and tests and are not bundled.
 
 ## License
 

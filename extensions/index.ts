@@ -3,6 +3,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { DEFAULT_SOUND, SOUNDS, loadSound, parseSound, saveSound, type Sound } from "../src/settings.ts";
 import { notifyMacOS, type Notification } from "../src/macos.ts";
 import { NotificationController, type Deliver } from "../src/notification-controller.ts";
+import { pickSound, type PickSound } from "../src/sound-picker.ts";
 
 // Dependency injection keeps tests independent of macOS and Notification Center.
 export function createNotifyExtension(options: {
@@ -10,6 +11,7 @@ export function createNotifyExtension(options: {
   deliver?: Deliver;
   delayMs?: number;
   settingsPath?: string;
+  pickSound?: PickSound;
 } = {}) {
   return function (pi: ExtensionAPI): void {
     const platform = options.platform ?? process.platform;
@@ -30,6 +32,7 @@ export function createNotifyExtension(options: {
       }
     };
     const testRequests = new Set<AbortController>();
+    let activePicker: AbortController | undefined;
     const supported = (ctx: ExtensionContext) => platform === "darwin" && ctx.mode === "tui";
     const notice = (ctx: ExtensionContext, body: string): Notification => ({
       title: `Pi · ${ctx.sessionManager.getSessionName()?.trim() || basename(ctx.cwd) || ctx.cwd}`,
@@ -46,6 +49,7 @@ export function createNotifyExtension(options: {
       controller.cancel();
       for (const request of testRequests) request.abort();
       testRequests.clear();
+      activePicker?.abort();
     };
 
     pi.on("session_start", (_event, ctx) => {
@@ -63,7 +67,7 @@ export function createNotifyExtension(options: {
     pi.on("agent_start", () => { controller.cancel(); });
     pi.on("agent_settled", (event, ctx) => {
       controller.cancel("prompt");
-      if (!supported(ctx) || event.aborted) {
+      if (!supported(ctx) || event.aborted || activePicker) {
         controller.cancel();
         return;
       }
@@ -73,7 +77,7 @@ export function createNotifyExtension(options: {
         () => ctx.isIdle() && !ctx.hasPendingMessages());
     });
     pi.on("ui_prompt_start", (_event, ctx) => {
-      if (!supported(ctx)) return;
+      if (!supported(ctx) || activePicker) return;
       context = ctx;
       loadSettings(ctx);
       controller.wait("prompt", notice(ctx, "Waiting for your response to a dialog."), () => true);
@@ -91,24 +95,42 @@ export function createNotifyExtension(options: {
         loadSettings(ctx);
         if (command === "sound" || command.startsWith("sound ")) {
           const value = command.slice("sound".length).trim();
-          if (!value) {
-            ctx.ui.notify(`pi-notify sound: ${sound ?? "none"}. Use /notify sound <name|none> or /notify sound list.`, "info");
-          } else if (value.toLowerCase() === "list") {
+          if (value.toLowerCase() === "list") {
             ctx.ui.notify(`Sounds: ${SOUNDS.join(", ")}, none (silent).`, "info");
+            return;
+          }
+          let selected: Sound | undefined;
+          if (!value) {
+            if (activePicker) return;
+            controller.cancel();
+            const request = new AbortController();
+            activePicker = request;
+            try {
+              selected = await (options.pickSound ?? pickSound)(ctx, sound, request.signal);
+              if (request.signal.aborted) return;
+            } catch (error) {
+              if (!request.signal.aborted) {
+                ctx.ui.notify(`pi-notify: could not open sound picker: ${error instanceof Error ? error.message : String(error)}`, "warning");
+              }
+              return;
+            } finally {
+              if (activePicker === request) activePicker = undefined;
+            }
+            if (selected === undefined) return;
           } else {
-            const selected = parseSound(value);
+            selected = parseSound(value);
             if (selected === undefined) {
               ctx.ui.notify("Unknown sound. Use /notify sound list to see available sounds.", "warning");
               return;
             }
-            try {
-              saveSound(settingsPath, selected);
-              sound = selected;
-              cancelAll();
-              ctx.ui.notify(`pi-notify sound: ${sound ?? "none"} (saved). Use /notify test to preview.`, "info");
-            } catch (error) {
-              ctx.ui.notify(`pi-notify: could not save sound: ${error instanceof Error ? error.message : String(error)}`, "warning");
-            }
+          }
+          try {
+            saveSound(settingsPath, selected);
+            sound = selected;
+            cancelAll();
+            ctx.ui.notify(`pi-notify sound: ${sound ?? "none"} (saved). Use /notify test to preview.`, "info");
+          } catch (error) {
+            ctx.ui.notify(`pi-notify: could not save sound: ${error instanceof Error ? error.message : String(error)}`, "warning");
           }
         } else if (command === "on" || command === "off") {
           controller.setEnabled(command === "on");

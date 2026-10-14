@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { createNotifyExtension } from "../extensions/index.ts";
 import { APPLESCRIPT, notificationArgs, type Notification } from "../src/macos.ts";
 import type { Deliver } from "../src/notification-controller.ts";
+import type { PickSound } from "../src/sound-picker.ts";
 
 type Handler = (event: Record<string, unknown>, ctx: ExtensionContext) => unknown;
 
@@ -16,6 +17,7 @@ function harness(t: TestContext, options: {
   mode?: string;
   deliver?: Deliver;
   settingsPath?: string;
+  pickSound?: PickSound;
 } = {}) {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const handlers = new Map<string, Handler>();
@@ -45,6 +47,7 @@ function harness(t: TestContext, options: {
   createNotifyExtension({
     platform: options.platform ?? "darwin",
     settingsPath,
+    pickSound: options.pickSound ?? (async () => undefined),
     deliver: options.deliver ?? (async (notification) => { sent.push(notification); }),
   })(api);
   const emit = async (name: string, event: Record<string, unknown> = {}) => {
@@ -231,6 +234,7 @@ test("uses session name when set, otherwise the cwd directory name", async (t) =
 test("sound commands list, validate, save, and preview preferences", async (t) => {
   const h = harness(t);
   await h.command("sound");
+  await h.command("status");
   assert.match(h.messages.at(-1)!, /sound: Glass/);
   await h.command("sound list");
   assert.match(h.messages.at(-1)!, /Glass.*Ping.*none/);
@@ -292,4 +296,44 @@ test("failed sound save leaves the active preference unchanged", async (t) => {
   assert.match(h.messages.at(-1)!, /could not save sound/);
   await h.command("test");
   assert.equal(h.sent[0].sound, "Glass");
+});
+
+for (const selected of ["Ping", null, undefined] as const) {
+  test(`sound picker result ${String(selected)} saves only on confirmation`, async (t) => {
+    let pickerOpened = false;
+    const h = harness(t, { pickSound: async (_ctx, current) => {
+      pickerOpened = true;
+      assert.equal(current, "Glass");
+      return selected;
+    } });
+    await h.command("sound");
+    assert.equal(pickerOpened, true);
+    await h.command("test");
+    assert.equal(h.sent.at(-1)!.sound, selected === undefined ? "Glass" : selected);
+    if (selected !== undefined) {
+      assert.deepEqual(JSON.parse(readFileSync(h.settingsPath, "utf8")), { sound: selected });
+    } else {
+      assert.throws(() => readFileSync(h.settingsPath));
+    }
+  });
+}
+
+test("the sound picker does not trigger its own notification and shutdown cancels it", async (t) => {
+  let pickerSignal: AbortSignal | undefined;
+  const h = harness(t, { pickSound: (_ctx, _current, signal) => {
+    pickerSignal = signal;
+    return new Promise((resolve) => {
+      signal.addEventListener("abort", () => resolve("Ping"), { once: true });
+    });
+  } });
+  await h.emit("agent_settled");
+  const picking = h.command("sound");
+  await h.emit("ui_prompt_start");
+  await h.emit("agent_settled");
+  await h.tick();
+  assert.equal(h.sent.length, 0);
+  await h.emit("session_shutdown");
+  await picking;
+  assert.equal(pickerSignal?.aborted, true);
+  assert.throws(() => readFileSync(h.settingsPath));
 });
