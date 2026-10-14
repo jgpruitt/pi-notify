@@ -1,0 +1,36 @@
+{
+  "name": "pi-notify",
+  "version": "0.1.0",
+  "description": "Native macOS notifications when Pi is waiting for your input",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jgpruitt/pi-notify.git"
+  },
+  "homepage": "https://github.com/jgpruitt/pi-notify#readme",
+  "bugs": {
+    "url": "https://github.com/jgpruitt/pi-notify/issues"
+  },
+  "keywords": ["pi-package", "pi", "macos", "notifications"],
+  "files": ["extensions", "src", "README.md", "LICENSE"],
+  "pi": {
+    "extensions": ["./extensions/index.ts"]
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.2.0",
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.3"
+  }
+}
