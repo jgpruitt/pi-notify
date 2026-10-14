@@ -3,15 +3,19 @@ import { execFile } from "node:child_process";
 export interface Notification {
   title: string;
   body: string;
+  /** null requests a silent notification; omitted retains the default Glass sound. */
+  sound?: string | null;
 }
 
 // All variable text is passed as argv, never interpolated into source code.
 export const APPLESCRIPT = `on run argv
-  display notification (item 2 of argv) with title (item 1 of argv) sound name "Glass"
+  display notification (item 2 of argv) with title (item 1 of argv) sound name (item 3 of argv)
 end run`;
 
 export function notificationArgs(notification: Notification): string[] {
-  return ["-e", APPLESCRIPT, "--", notification.title, notification.body];
+  // An empty sound name explicitly disables sound (rather than using a system default).
+  const sound = notification.sound === undefined ? "Glass" : notification.sound ?? "";
+  return ["-e", APPLESCRIPT, "--", notification.title, notification.body, sound];
 }
 
 export function notifyMacOS(notification: Notification, signal?: AbortSignal): Promise<void> {

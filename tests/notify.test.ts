@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -12,6 +15,7 @@ function harness(t: TestContext, options: {
   platform?: NodeJS.Platform;
   mode?: string;
   deliver?: Deliver;
+  settingsPath?: string;
 } = {}) {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const handlers = new Map<string, Handler>();
@@ -20,9 +24,14 @@ function harness(t: TestContext, options: {
   const messages: string[] = [];
   let idle = true;
   let pending = false;
+  let sessionName: string | undefined;
+  const directory = mkdtempSync(join(tmpdir(), "pi-notify-test-"));
+  const settingsPath = options.settingsPath ?? join(directory, "pi-notify.json");
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
   const ctx = {
     cwd: "/projects/example",
     mode: options.mode ?? "tui",
+    sessionManager: { getSessionName: () => sessionName },
     isIdle: () => idle,
     hasPendingMessages: () => pending,
     ui: { notify: (message: string) => messages.push(message) },
@@ -35,6 +44,7 @@ function harness(t: TestContext, options: {
   } as unknown as ExtensionAPI;
   createNotifyExtension({
     platform: options.platform ?? "darwin",
+    settingsPath,
     deliver: options.deliver ?? (async (notification) => { sent.push(notification); }),
   })(api);
   const emit = async (name: string, event: Record<string, unknown> = {}) => {
@@ -46,7 +56,8 @@ function harness(t: TestContext, options: {
   };
   const command = (args: string) => commands.get("notify")!.handler(args, ctx);
   t.after(() => emit("session_shutdown"));
-  return { sent, messages, emit, tick, command,
+  return { sent, messages, emit, tick, command, settingsPath,
+    setSessionName: (value: string | undefined) => { sessionName = value; },
     setIdle: (value: boolean) => { idle = value; },
     setPending: (value: boolean) => { pending = value; },
   };
@@ -55,7 +66,7 @@ function harness(t: TestContext, options: {
 test("AppleScript source is fixed and notification text is passed as literal arguments", () => {
   const title = 'Quotes " \\ and unicode 🐢';
   const body = '\n" & do shell script "touch /tmp/nope"\n-- -e';
-  assert.deepEqual(notificationArgs({ title, body }), ["-e", APPLESCRIPT, "--", title, body]);
+  assert.deepEqual(notificationArgs({ title, body }), ["-e", APPLESCRIPT, "--", title, body, "Glass"]);
   assert.ok(!APPLESCRIPT.includes(body));
 });
 
@@ -69,7 +80,7 @@ test("startup and low-level agent_end do not ping; settled pings once after grac
   await h.tick(999);
   assert.equal(h.sent.length, 0);
   await h.tick(1);
-  assert.deepEqual(h.sent, [{ title: "Pi · example", body: "Ready for your next message." }]);
+  assert.deepEqual(h.sent, [{ title: "Pi · example", body: "Ready for your next message.", sound: "Glass" }]);
   await h.emit("agent_settled", { aborted: false });
   await h.tick();
   assert.equal(h.sent.length, 1);
@@ -194,4 +205,91 @@ test("shutdown aborts an in-flight delivery without warning", async (t) => {
   await setImmediate();
   assert.equal(signal?.aborted, true);
   assert.equal(h.messages.length, 0);
+});
+
+test("sound is a literal AppleScript argument, with empty string for silent", () => {
+  assert.equal(notificationArgs({ title: "Pi", body: "Ready", sound: null }).at(-1), "");
+  assert.equal(notificationArgs({ title: "Pi", body: "Ready", sound: "Ping" }).at(-1), "Ping");
+});
+
+test("uses session name when set, otherwise the cwd directory name", async (t) => {
+  const h = harness(t);
+  h.setSessionName("Fix notification tests 🐢");
+  await h.emit("agent_settled");
+  await h.tick();
+  assert.equal(h.sent[0].title, "Pi · Fix notification tests 🐢");
+  h.setSessionName("  ");
+  await h.emit("agent_start");
+  await h.emit("agent_settled");
+  await h.tick();
+  assert.equal(h.sent[1].title, "Pi · example");
+  h.setSessionName("New session name");
+  await h.command("test");
+  assert.equal(h.sent[2].title, "Pi · New session name");
+});
+
+test("sound commands list, validate, save, and preview preferences", async (t) => {
+  const h = harness(t);
+  await h.command("sound");
+  assert.match(h.messages.at(-1)!, /sound: Glass/);
+  await h.command("sound list");
+  assert.match(h.messages.at(-1)!, /Glass.*Ping.*none/);
+  await h.command("sound pInG");
+  assert.deepEqual(JSON.parse(readFileSync(h.settingsPath, "utf8")), { sound: "Ping" });
+  await h.command("test");
+  assert.equal(h.sent.at(-1)!.sound, "Ping");
+  await h.command("sound invalid");
+  assert.match(h.messages.at(-1)!, /Unknown sound/);
+  await h.command("test");
+  assert.equal(h.sent.at(-1)!.sound, "Ping");
+  await h.command("sound none");
+  await h.command("test");
+  assert.equal(h.sent.at(-1)!.sound, null);
+  await h.command("status");
+  assert.match(h.messages.at(-1)!, /sound: none/);
+});
+
+test("saved sound is loaded at session start, including silent", async (t) => {
+  const h = harness(t);
+  for (const sound of ["Pop", null]) {
+    writeFileSync(h.settingsPath, JSON.stringify({ sound }));
+    await h.emit("session_start");
+    await h.emit("agent_settled");
+    await h.tick();
+    assert.equal(h.sent.at(-1)!.sound, sound);
+  }
+});
+
+test("changing sound cancels a pending ping with the old preference", async (t) => {
+  const h = harness(t);
+  await h.emit("agent_settled");
+  await h.command("sound Pop");
+  await h.tick();
+  assert.equal(h.sent.length, 0);
+  await h.emit("agent_start");
+  await h.emit("agent_settled");
+  await h.tick();
+  assert.equal(h.sent[0].sound, "Pop");
+});
+
+test("malformed settings warn and fall back without interrupting notification", async (t) => {
+  const h = harness(t);
+  for (const contents of ["{bad json", "[]", "null", '{"sound":42}', '{"sound":"nonexistent"}']) {
+    writeFileSync(h.settingsPath, contents);
+    await h.emit("session_start");
+    assert.match(h.messages.at(-1)!, /could not read.*using Glass/);
+    await h.emit("agent_settled");
+    await h.tick();
+    assert.equal(h.sent.at(-1)!.sound, "Glass");
+  }
+});
+
+test("failed sound save leaves the active preference unchanged", async (t) => {
+  const h = harness(t);
+  await h.emit("session_start");
+  mkdirSync(h.settingsPath);
+  await h.command("sound Ping");
+  assert.match(h.messages.at(-1)!, /could not save sound/);
+  await h.command("test");
+  assert.equal(h.sent[0].sound, "Glass");
 });

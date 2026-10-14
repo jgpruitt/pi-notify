@@ -1,5 +1,6 @@
-import { basename } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { basename, join } from "node:path";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_SOUND, SOUNDS, loadSound, parseSound, saveSound, type Sound } from "../src/settings.ts";
 import { notifyMacOS, type Notification } from "../src/macos.ts";
 import { NotificationController, type Deliver } from "../src/notification-controller.ts";
 
@@ -8,17 +9,32 @@ export function createNotifyExtension(options: {
   platform?: NodeJS.Platform;
   deliver?: Deliver;
   delayMs?: number;
+  settingsPath?: string;
 } = {}) {
   return function (pi: ExtensionAPI): void {
     const platform = options.platform ?? process.platform;
     const deliver = options.deliver ?? notifyMacOS;
     let context: ExtensionContext | undefined;
     let warned = false;
+    let sound: Sound = DEFAULT_SOUND;
+    let settingsLoaded = false;
+    const settingsPath = options.settingsPath ?? join(getAgentDir(), "pi-notify.json");
+    const loadSettings = (ctx: ExtensionContext) => {
+      if (settingsLoaded) return;
+      settingsLoaded = true;
+      sound = DEFAULT_SOUND;
+      try {
+        sound = loadSound(settingsPath);
+      } catch (error) {
+        ctx.ui.notify(`pi-notify: could not read ${settingsPath}; using Glass. ${error instanceof Error ? error.message : String(error)}`, "warning");
+      }
+    };
     const testRequests = new Set<AbortController>();
     const supported = (ctx: ExtensionContext) => platform === "darwin" && ctx.mode === "tui";
     const notice = (ctx: ExtensionContext, body: string): Notification => ({
-      title: `Pi · ${basename(ctx.cwd) || ctx.cwd}`,
+      title: `Pi · ${ctx.sessionManager.getSessionName()?.trim() || basename(ctx.cwd) || ctx.cwd}`,
       body,
+      sound,
     });
     const controller = new NotificationController(deliver, (error) => {
       if (warned) return;
@@ -36,6 +52,8 @@ export function createNotifyExtension(options: {
       cancelAll();
       context = ctx;
       warned = false;
+      settingsLoaded = false;
+      if (supported(ctx)) loadSettings(ctx);
     });
     pi.on("session_shutdown", () => {
       cancelAll();
@@ -50,30 +68,54 @@ export function createNotifyExtension(options: {
         return;
       }
       context = ctx;
+      loadSettings(ctx);
       controller.wait("settled", notice(ctx, "Ready for your next message."),
         () => ctx.isIdle() && !ctx.hasPendingMessages());
     });
     pi.on("ui_prompt_start", (_event, ctx) => {
       if (!supported(ctx)) return;
       context = ctx;
+      loadSettings(ctx);
       controller.wait("prompt", notice(ctx, "Waiting for your response to a dialog."), () => true);
     });
     pi.on("ui_prompt_end", () => { controller.cancel("prompt"); });
 
     pi.registerCommand("notify", {
-      description: "macOS notifications: test, on, off, status",
+      description: "macOS notifications: test, on, off, status, sound [name|none|list]",
       handler: async (args, ctx) => {
         const command = args.trim() || "status";
         if (!supported(ctx)) {
           ctx.ui.notify("pi-notify requires macOS and interactive TUI mode.", "warning");
           return;
         }
-        if (command === "on" || command === "off") {
+        loadSettings(ctx);
+        if (command === "sound" || command.startsWith("sound ")) {
+          const value = command.slice("sound".length).trim();
+          if (!value) {
+            ctx.ui.notify(`pi-notify sound: ${sound ?? "none"}. Use /notify sound <name|none> or /notify sound list.`, "info");
+          } else if (value.toLowerCase() === "list") {
+            ctx.ui.notify(`Sounds: ${SOUNDS.join(", ")}, none (silent).`, "info");
+          } else {
+            const selected = parseSound(value);
+            if (selected === undefined) {
+              ctx.ui.notify("Unknown sound. Use /notify sound list to see available sounds.", "warning");
+              return;
+            }
+            try {
+              saveSound(settingsPath, selected);
+              sound = selected;
+              cancelAll();
+              ctx.ui.notify(`pi-notify sound: ${sound ?? "none"} (saved). Use /notify test to preview.`, "info");
+            } catch (error) {
+              ctx.ui.notify(`pi-notify: could not save sound: ${error instanceof Error ? error.message : String(error)}`, "warning");
+            }
+          }
+        } else if (command === "on" || command === "off") {
           controller.setEnabled(command === "on");
           if (command === "off") cancelAll();
           ctx.ui.notify(`pi-notify: ${command} (this extension runtime only).`, "info");
         } else if (command === "status") {
-          ctx.ui.notify(`pi-notify: ${controller.enabled ? "on" : "off"}; AppleScript; sound: Glass; grace period: 1 second.`, "info");
+          ctx.ui.notify(`pi-notify: ${controller.enabled ? "on" : "off"}; AppleScript; sound: ${sound ?? "none"}; grace period: 1 second.`, "info");
         } else if (command === "test") {
           const request = new AbortController();
           testRequests.add(request);
@@ -88,7 +130,7 @@ export function createNotifyExtension(options: {
             testRequests.delete(request);
           }
         } else {
-          ctx.ui.notify("Usage: /notify [test|on|off|status]", "info");
+          ctx.ui.notify("Usage: /notify [test|on|off|status|sound [name|none|list]]", "info");
         }
       },
     });

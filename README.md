@@ -36,12 +36,13 @@ pi -e ./extensions/index.ts
 - **Blocking dialog:** one notification when Pi opens an extension confirmation, selection, input, editor, or custom blocking UI prompt. This does not detect arbitrary questions printed by shell subprocesses.
 - **One-second grace period:** answering a dialog, submitting input, or starting new agent work cancels a pending ping. Queued messages and a busy agent also suppress completion pings.
 - **One ping per waiting episode:** no repeating reminders. No startup ping.
-- **Privacy:** title is `Pi · <project-directory>`; body is a fixed readiness or dialog message. Prompt contents, assistant output, session transcripts, and full paths are not sent. The project directory name may be visible on the lock screen.
-- **Sound:** requests the built-in `Glass` sound. macOS notification settings and Focus determine whether a banner or sound actually appears.
+- **Session context:** title is `Pi · <session-name>` when the session is named, otherwise `Pi · <cwd-directory-name>`. Pi's `/name` command can set the session name.
+- **Privacy:** body is a fixed readiness or dialog message. Prompt contents, assistant output, session transcripts, and full cwd paths are not sent. The session name or project directory name may be visible on the lock screen; avoid sensitive session names if that matters.
+- **Sound:** defaults to `Glass`; choose a built-in sound or silent notifications with `/notify sound`. macOS notification settings and Focus determine whether a banner or sound actually appears.
 - **Cleanup:** shutdown, reload, and session replacement cancel pending timers and abort in-flight notification subprocesses. Already posted notifications cannot be recalled.
 - **Failures:** notification subprocesses time out after five seconds. Automatic failures produce at most one warning per session and do not interrupt the agent.
 
-Notifications are sent even when the terminal is focused. There is no terminal/tab focus detection, click-to-focus integration, persistent preference file, or background service.
+Notifications are sent even when the terminal is focused. There is no terminal/tab focus detection, click-to-focus integration, or background service.
 
 ## Commands
 
@@ -51,8 +52,24 @@ Notifications are sent even when the terminal is focused. There is no terminal/t
 | `/notify test` | Immediately submit a test notification, even when automatic pings are off |
 | `/notify off` | Disable automatic pings and cancel pending delivery |
 | `/notify on` | Enable automatic pings for future waiting episodes |
+| `/notify sound` | Show the current sound |
+| `/notify sound list` | List built-in sound choices |
+| `/notify sound Ping` | Choose and save a sound (case-insensitive) |
+| `/notify sound none` | Choose and save silent notifications |
 
-The on/off preference lasts only for the current extension runtime; reload or restart restores the default (on). Enabling does not retroactively ping for an already-open dialog.
+Use `/notify test` to preview your selection. Changing sound cancels pending notifications so they do not use the previous sound.
+
+Sound is saved in `~/.pi/agent/pi-notify.json` (or `$PI_CODING_AGENT_DIR/pi-notify.json` when overridden), independently of Pi's own settings. It survives reloads and restarts. Other running Pi instances pick it up on their next session start or reload. You can also edit the file directly and reload:
+
+```json
+{
+  "sound": "Ping"
+}
+```
+
+Use `"sound": null` for silent notifications. Missing settings default to `Glass`; unreadable or invalid settings produce a warning and fall back to `Glass`.
+
+The on/off preference still lasts only for the current extension runtime; reload or restart restores the default (on). Enabling does not retroactively ping for an already-open dialog.
 
 ## macOS setup and troubleshooting
 
@@ -77,7 +94,8 @@ Layout:
 - `extensions/index.ts`: Pi events and commands.
 - `src/notification-controller.ts`: delayed, cancellable, deduplicated waiting episodes.
 - `src/macos.ts`: fixed AppleScript executed with literal argument values and no shell.
-- `tests/notify.test.ts`: event, command, privacy, cancellation, and failure coverage.
+- `src/settings.ts`: sound validation and atomic preference-file writes.
+- `tests/notify.test.ts`: event, command, session identity, sound persistence, privacy, cancellation, and failure coverage.
 
 The Pi package exposes only `extensions/index.ts`. Pi is a host-provided peer dependency; the development copy is used for types and is not bundled.
 
