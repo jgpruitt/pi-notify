@@ -1,6 +1,6 @@
 # pi-notify
 
-Native macOS notifications when [Pi](https://pi.dev) is waiting for you. Uses the built-in AppleScript notification command: no Homebrew utility, compiled helper, runtime npm dependency, or model tool required.
+Native macOS notifications when [Pi](https://pi.dev) is waiting for you. Uses the built-in AppleScript notification command: no Homebrew utility, compiled helper, or runtime npm dependency required. Also provides a `notify` tool so the agent can send a custom message.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ pi -e ./extensions/index.ts
 - **One-second grace period:** answering a dialog, submitting input, or starting new agent work cancels a pending ping. Queued messages and a busy agent also suppress completion pings.
 - **One ping per waiting episode:** no repeating reminders. No startup ping.
 - **Session context:** title is `Pi · <session-name>` when the session is named, otherwise `Pi · <cwd-directory-name>`. Pi's `/name` command can set the session name.
-- **Privacy:** body is a fixed readiness or dialog message. Prompt contents, assistant output, session transcripts, and full cwd paths are not sent. The session name or project directory name may be visible on the lock screen; avoid sensitive session names if that matters.
+- **Privacy:** automatic notifications use a fixed readiness or dialog message; they do not send prompt contents, assistant output, session transcripts, or full cwd paths. Tool-triggered notifications send the agent's custom message. The message and session/project name may be visible on the lock screen; avoid sensitive content.
 - **Sound:** defaults to `Glass`; choose a built-in sound or silent notifications with `/notify sound`. macOS notification settings and Focus determine whether a banner or sound actually appears.
 - **Cleanup:** shutdown, reload, and session replacement cancel pending timers and abort in-flight notification subprocesses. Already posted notifications cannot be recalled.
 - **Failures:** notification subprocesses time out after five seconds. Automatic failures produce at most one warning per session and do not interrupt the agent.
@@ -50,8 +50,8 @@ Notifications are sent even when the terminal is focused. There is no terminal/t
 | --- | --- |
 | `/notify` or `/notify status` | Show current state and backend |
 | `/notify test` | Immediately submit a test notification, even when automatic pings are off |
-| `/notify off` | Disable automatic pings and cancel pending delivery |
-| `/notify on` | Enable automatic pings for future waiting episodes |
+| `/notify off` | Disable automatic and tool-triggered notifications and cancel pending delivery |
+| `/notify on` | Enable automatic and tool-triggered notifications for future use |
 | `/notify sound` | Open a sound picker with live previews |
 | `/notify sound list` | List built-in sound choices |
 | `/notify sound Ping` | Choose and save a sound (case-insensitive) |
@@ -75,6 +75,22 @@ Use `"sound": null` for silent notifications. Missing settings default to `Glass
 
 The on/off preference still lasts only for the current extension runtime; reload or restart restores the default (on). Enabling does not retroactively ping for an already-open dialog.
 
+## Agent tool
+
+The agent can submit a custom notification immediately:
+
+```text
+notify({ message: "Tests passed. Ready for your review." })
+```
+
+The tool uses the existing session/project title and configured sound. It respects `/notify off`; `/notify test` remains the explicit exception. Like automatic notifications, it requires macOS interactive TUI mode and only notifies the Mac hosting Pi.
+
+The tool description guides the agent to use notifications sparingly for important milestones or actionable blockers, keep messages brief, and omit secrets or sensitive details. Custom message text may appear on the lock screen. No prompt or transcript is automatically attached.
+
+A successful submission suppresses the generic completion ping for that agent run, even if the agent continues working afterward. Blocking-dialog pings are unchanged, and the next run can notify normally. Failed, disabled, or cancelled tool calls do not suppress completion pings. Tool failures are returned to the agent rather than producing an extra UI warning.
+
+Success means submitted to macOS, not guaranteed banner display or sound; permissions and Focus still apply. Shutdown, reload, session replacement, `/notify off`, changing sound, or tool cancellation abort in-flight tool delivery. Already posted notifications cannot be recalled.
+
 ## macOS setup and troubleshooting
 
 1. Run `/notify test`.
@@ -95,7 +111,7 @@ Tests use Node's built-in test runner and mocked timers; they do not post deskto
 
 Layout:
 
-- `extensions/index.ts`: Pi events and commands.
+- `extensions/index.ts`: Pi events, commands, and the agent notification tool.
 - `src/notification-controller.ts`: delayed, cancellable, deduplicated waiting episodes.
 - `src/macos.ts`: fixed AppleScript executed with literal argument values and no shell.
 - `src/settings.ts`: sound validation and atomic preference-file writes.
@@ -103,7 +119,7 @@ Layout:
 - `src/sound-preview.ts`: debounced, cancellable audio previews.
 - `tests/`: event, command, session identity, persistence, picker, preview, privacy, cancellation, and failure coverage.
 
-The Pi package exposes only `extensions/index.ts`. Pi and Pi TUI are host-provided peer dependencies; development copies support type-checking and tests and are not bundled.
+The Pi package exposes only `extensions/index.ts`. Pi, Pi AI (parameter schemas), and Pi TUI are host-provided peer dependencies; development copies support type-checking and tests and are not bundled.
 
 ## License
 

@@ -1,4 +1,5 @@
 import { basename, join } from "node:path";
+import { Type } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SOUND, SOUNDS, loadSound, parseSound, saveSound, type Sound } from "../src/settings.ts";
 import { notifyMacOS, type Notification } from "../src/macos.ts";
@@ -31,7 +32,9 @@ export function createNotifyExtension(options: {
         ctx.ui.notify(`pi-notify: could not read ${settingsPath}; using Glass. ${error instanceof Error ? error.message : String(error)}`, "warning");
       }
     };
-    const testRequests = new Set<AbortController>();
+    // Shared by explicit tests and agent tools so off/reload/shutdown abort both.
+    const immediateRequests = new Set<AbortController>();
+    let run = { notified: false };
     let activePicker: AbortController | undefined;
     const supported = (ctx: ExtensionContext) => platform === "darwin" && ctx.mode === "tui";
     const notice = (ctx: ExtensionContext, body: string): Notification => ({
@@ -47,14 +50,15 @@ export function createNotifyExtension(options: {
     }, options.delayMs);
     const cancelAll = () => {
       controller.cancel();
-      for (const request of testRequests) request.abort();
-      testRequests.clear();
+      for (const request of immediateRequests) request.abort();
+      immediateRequests.clear();
       activePicker?.abort();
     };
 
     pi.on("session_start", (_event, ctx) => {
       cancelAll();
       context = ctx;
+      run = { notified: false };
       warned = false;
       settingsLoaded = false;
       if (supported(ctx)) loadSettings(ctx);
@@ -62,12 +66,16 @@ export function createNotifyExtension(options: {
     pi.on("session_shutdown", () => {
       cancelAll();
       context = undefined;
+      run = { notified: false };
     });
     pi.on("input", () => { controller.cancel(); });
-    pi.on("agent_start", () => { controller.cancel(); });
+    pi.on("agent_start", () => {
+      controller.cancel();
+      run = { notified: false };
+    });
     pi.on("agent_settled", (event, ctx) => {
       controller.cancel("prompt");
-      if (!supported(ctx) || event.aborted || activePicker) {
+      if (!supported(ctx) || event.aborted || activePicker || run.notified) {
         controller.cancel();
         return;
       }
@@ -83,6 +91,45 @@ export function createNotifyExtension(options: {
       controller.wait("prompt", notice(ctx, "Waiting for your response to a dialog."), () => true);
     });
     pi.on("ui_prompt_end", () => { controller.cancel("prompt"); });
+
+    pi.registerTool({
+      name: "notify",
+      label: "Notify",
+      description: "Submit a native macOS notification to the user immediately. Use sparingly for important milestones or actionable blockers, not routine progress. Keep messages brief and omit secrets or sensitive details: text may appear on the lock screen. Requires macOS interactive TUI mode and respects /notify off. Submission does not guarantee a visible banner or sound.",
+      parameters: Type.Object({
+        message: Type.String({ minLength: 1, description: "Brief notification message; no secrets or sensitive details." }),
+      }),
+      async execute(_toolCallId, { message }, signal, _onUpdate, ctx) {
+        if (!message.trim()) throw new Error("Notification message must not be blank.");
+        if (!supported(ctx)) throw new Error("pi-notify requires macOS and interactive TUI mode.");
+        if (!controller.enabled) {
+          return {
+            content: [{ type: "text", text: "Notification not sent: disabled by /notify off." }],
+            details: { status: "disabled" },
+          };
+        }
+        loadSettings(ctx);
+        const currentRun = run;
+        const request = new AbortController();
+        const deliverySignal = signal ? AbortSignal.any([signal, request.signal]) : request.signal;
+        immediateRequests.add(request);
+        try {
+          deliverySignal.throwIfAborted();
+          await deliver(notice(ctx, message), deliverySignal);
+          deliverySignal.throwIfAborted();
+          if (run === currentRun) {
+            currentRun.notified = true;
+            controller.cancel("settled");
+          }
+          return {
+            content: [{ type: "text", text: "Notification submitted to macOS. Display and sound depend on notification permissions and Focus settings." }],
+            details: { status: "submitted" },
+          };
+        } finally {
+          immediateRequests.delete(request);
+        }
+      },
+    });
 
     pi.registerCommand("notify", {
       description: "macOS notifications: test, on, off, status, sound [name|none|list]",
@@ -140,7 +187,7 @@ export function createNotifyExtension(options: {
           ctx.ui.notify(`pi-notify: ${controller.enabled ? "on" : "off"}; AppleScript; sound: ${sound ?? "none"}; grace period: 1 second.`, "info");
         } else if (command === "test") {
           const request = new AbortController();
-          testRequests.add(request);
+          immediateRequests.add(request);
           try {
             await deliver(notice(ctx, "Notifications are working. Pi will ping when it needs you."), request.signal);
             ctx.ui.notify("Test submitted to macOS. If no banner appears, check notification permissions and Focus mode.", "info");
@@ -149,7 +196,7 @@ export function createNotifyExtension(options: {
               ctx.ui.notify(`pi-notify test failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
             }
           } finally {
-            testRequests.delete(request);
+            immediateRequests.delete(request);
           }
         } else {
           ctx.ui.notify("Usage: /notify [test|on|off|status|sound [name|none|list]]", "info");

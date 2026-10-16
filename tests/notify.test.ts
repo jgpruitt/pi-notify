@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createNotifyExtension } from "../extensions/index.ts";
 import { APPLESCRIPT, notificationArgs, type Notification } from "../src/macos.ts";
 import type { Deliver } from "../src/notification-controller.ts";
@@ -22,6 +22,7 @@ function harness(t: TestContext, options: {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const handlers = new Map<string, Handler>();
   const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
+  const tools = new Map<string, ToolDefinition>();
   const sent: Notification[] = [];
   const messages: string[] = [];
   let idle = true;
@@ -43,6 +44,7 @@ function harness(t: TestContext, options: {
     registerCommand: (name: string, command: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => {
       commands.set(name, command);
     },
+    registerTool: (tool: ToolDefinition) => { tools.set(tool.name, tool); },
   } as unknown as ExtensionAPI;
   createNotifyExtension({
     platform: options.platform ?? "darwin",
@@ -59,12 +61,134 @@ function harness(t: TestContext, options: {
   };
   const command = (args: string) => commands.get("notify")!.handler(args, ctx);
   t.after(() => emit("session_shutdown"));
-  return { sent, messages, emit, tick, command, settingsPath,
+  const notify = (message: string, signal?: AbortSignal) =>
+    tools.get("notify")!.execute("test-call", { message }, signal, undefined, ctx as ExtensionToolContext);
+  return { sent, messages, emit, tick, command, notify, settingsPath,
     setSessionName: (value: string | undefined) => { sessionName = value; },
     setIdle: (value: boolean) => { idle = value; },
     setPending: (value: boolean) => { pending = value; },
   };
 }
+
+test("notify tool sends literal custom text immediately with the session title and saved sound", async (t) => {
+  const h = harness(t);
+  h.setSessionName("Review 🐢");
+  writeFileSync(h.settingsPath, JSON.stringify({ sound: null }));
+  const message = 'Tests passed. " & do shell script "nope"\nReady for review.';
+  const result = await h.notify(message);
+  assert.deepEqual(h.sent, [{ title: "Pi · Review 🐢", body: message, sound: null }]);
+  assert.deepEqual(result.details, { status: "submitted" });
+  assert.match(JSON.stringify(result.content), /submitted to macOS/);
+});
+
+test("notify off disables the tool too, while test remains an exception", async (t) => {
+  const h = harness(t);
+  await h.command("off");
+  const result = await h.notify("Ready");
+  assert.deepEqual(result.details, { status: "disabled" });
+  assert.equal(h.sent.length, 0);
+  await h.command("test");
+  assert.equal(h.sent.length, 1);
+  await h.command("on");
+  await h.notify("Ready");
+  assert.equal(h.sent.length, 2);
+});
+
+test("custom submission suppresses completion for this run only, not blocking dialogs", async (t) => {
+  const h = harness(t);
+  await h.emit("agent_start");
+  await h.notify("Ready for review");
+  await h.emit("ui_prompt_start");
+  await h.tick();
+  assert.equal(h.sent.length, 2);
+  assert.match(h.sent[1].body, /dialog/);
+  await h.emit("ui_prompt_end");
+  await h.emit("agent_settled");
+  await h.tick();
+  assert.equal(h.sent.length, 2);
+  await h.emit("agent_start");
+  await h.emit("agent_settled");
+  await h.tick();
+  assert.equal(h.sent.length, 3);
+  assert.match(h.sent[2].body, /next message/);
+});
+
+test("custom submission cancels a pending completion ping", async (t) => {
+  const h = harness(t);
+  await h.emit("agent_settled");
+  await h.notify("Ready for review");
+  await h.tick();
+  assert.equal(h.sent.length, 1);
+});
+
+test("failed tool submission is an error and does not suppress automatic completion", async (t) => {
+  let calls = 0;
+  const h = harness(t, { deliver: async () => {
+    if (++calls === 1) throw new Error("osascript failed");
+  } });
+  await assert.rejects(h.notify("Ready"), /osascript failed/);
+  await h.emit("agent_settled");
+  await h.tick();
+  assert.equal(calls, 2);
+  assert.equal(h.messages.length, 0);
+});
+
+test("blank messages are rejected without delivery", async (t) => {
+  const h = harness(t);
+  await assert.rejects(h.notify(" \n\t"), /must not be blank/);
+  assert.equal(h.sent.length, 0);
+});
+
+for (const options of [{ platform: "linux" as const }, { mode: "rpc" }, { mode: "json" }, { mode: "print" }]) {
+  test(`notify tool rejects unsupported environment ${JSON.stringify(options)}`, async (t) => {
+    const h = harness(t, options);
+    await assert.rejects(h.notify("Ready"), /requires macOS and interactive TUI/);
+    assert.equal(h.sent.length, 0);
+  });
+}
+
+for (const cancellation of ["off", "session_shutdown", "session_start", "sound", "tool-abort"]) {
+  test(`${cancellation} aborts an in-flight tool notification`, async (t) => {
+    let deliverySignal: AbortSignal | undefined;
+    const h = harness(t, { deliver: (_notice, signal) => {
+      deliverySignal = signal;
+      return new Promise<void>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+      });
+    } });
+    const abort = new AbortController();
+    const result = h.notify("Ready", abort.signal);
+    const rejected = assert.rejects(result, /cancelled/);
+    if (cancellation === "off") await h.command("off");
+    else if (cancellation === "sound") await h.command("sound Ping");
+    else if (cancellation === "tool-abort") abort.abort();
+    else await h.emit(cancellation);
+    await rejected;
+    assert.equal(deliverySignal?.aborted, true);
+    assert.equal(h.messages.filter((message) => message.includes("could not send")).length, 0);
+  });
+}
+
+test("already-aborted tool calls do not start delivery", async (t) => {
+  const h = harness(t);
+  await assert.rejects(h.notify("Ready", AbortSignal.abort()));
+  assert.equal(h.sent.length, 0);
+});
+
+test("a late tool result cannot suppress a new run's completion notification", async (t) => {
+  let finish: (() => void) | undefined;
+  let calls = 0;
+  const h = harness(t, { deliver: async () => {
+    if (++calls === 1) await new Promise<void>((resolve) => { finish = resolve; });
+  } });
+  const result = h.notify("Ready");
+  await h.emit("agent_start");
+  finish!();
+  await result;
+  await h.emit("agent_settled");
+  await h.tick();
+  assert.equal(calls, 2);
+});
 
 test("AppleScript source is fixed and notification text is passed as literal arguments", () => {
   const title = 'Quotes " \\ and unicode 🐢';
